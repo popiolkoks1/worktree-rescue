@@ -1,0 +1,10 @@
+{
+  "name": "rescue",
+  "version": "0.1.0",
+  "description": "Quietly archive and clean finished Claude Code worktrees. Restore unfinished work whenever you need it.",
+  "author": { "name": "popiolkoks1", "url": "https://github.com/popiolkoks1" },
+  "repository": "https://github.com/popiolkoks1/worktree-rescue",
+  "homepage": "https://github.com/popiolkoks1/worktree-rescue#readme",
+  "license": "MIT",
+  "keywords": ["worktree", "cleanup", "recovery", "git", "claude-code"]
+}

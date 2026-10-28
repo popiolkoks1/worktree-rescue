@@ -1,0 +1,15 @@
+{
+  "name": "worktree-rescue",
+  "owner": {
+    "name": "popiolkoks1"
+  },
+  "plugins": [
+    {
+      "name": "rescue",
+      "source": "./",
+      "description": "Automatic local worktree cleanup with verified recovery archives.",
+      "version": "0.1.0"
+    }
+  ],
+  "description": "Quiet, local worktree cleanup and recovery for Claude Code."
+}

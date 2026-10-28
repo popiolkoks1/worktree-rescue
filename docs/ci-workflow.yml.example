@@ -1,0 +1,24 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.9', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m compileall -q scripts tests
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/demo.py
+      - run: python -m pip install . --target /tmp/rescue-package
+      - run: cd /tmp && PYTHONPATH=/tmp/rescue-package python -c 'import rescue; assert rescue.VERSION == "0.1.0"'
