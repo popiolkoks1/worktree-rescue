@@ -388,6 +388,90 @@ class RescueTests(unittest.TestCase):
             self.rescue.restore(archive_id, self.root / 'restored')
         self.assertFalse((self.root / 'outside.txt').exists())
 
+    def test_environment_uses_git_patterns_and_copies_only_ignored_files(self):
+        (self.repo / '.gitignore').write_text('secret.env\n.env*\nlocal/\n')
+        (self.repo / '.worktreeinclude').write_text('.env*\nlocal/**\n!local/skip.txt\ntracked.txt\n')
+        (self.repo / '.env').write_text('LOCAL=example\n')
+        (self.repo / 'local').mkdir()
+        (self.repo / 'local' / 'keep.txt').write_text('local data')
+        (self.repo / 'local' / 'skip.txt').write_text('excluded')
+        record = self.create()
+        path = Path(record['path'])
+        self.assertEqual((path / '.env').read_text(), 'LOCAL=example\n')
+        self.assertEqual((path / 'local' / 'keep.txt').read_text(), 'local data')
+        self.assertFalse((path / 'local' / 'skip.txt').exists())
+        self.assertEqual((path / 'tracked.txt').read_text(), 'original\n')
+
+    def test_environment_symlink_is_refused_and_creation_rolled_back(self):
+        (self.repo / '.worktreeinclude').write_text('secret.env\n')
+        outside = self.root / 'outside'
+        outside.write_text('private')
+        (self.repo / 'secret.env').symlink_to(outside)
+        with self.assertRaisesRegex(module.RescueError, 'symlink'):
+            self.create()
+        self.assertFalse(self.rescue.state()['worktrees'])
+        self.assertEqual(list((self.rescue.home / 'worktrees').iterdir()), [])
+        self.assertEqual(self.g('branch', '--format=%(refname:short)'), 'main')
+
+    def test_adopt_external_archive_restore_and_retain_branch(self):
+        path = self.root / 'external'
+        self.g('worktree', 'add', '-b', 'other-tool/task', str(path))
+        (path / 'tracked.txt').write_text('staged\n')
+        self.g('add', 'tracked.txt', cwd=path)
+        (path / 'tracked.txt').write_text('working\n')
+        (path / 'secret.env').write_text('LOCAL=example')
+        before = module.inventory(path)
+        record = self.rescue.adopt(path, 'main')
+        self.assertTrue(record['external'])
+        self.assertEqual(self.rescue.adopt(path, 'main')['id'], record['id'])
+        state = self.rescue.state()
+        state['worktrees'][record['id']]['last_activity'] -= 8 * 86400
+        self.rescue.save(state)
+        result = self.sweep()[0]
+        self.assertEqual(result['action'], 'archived', result)
+        self.assertFalse(path.exists())
+        self.assertIn('other-tool/task', self.g('branch', '--format=%(refname:short)'))
+        restored = self.root / 'recovered-external'
+        self.rescue.restore(result['archive'], restored)
+        self.assertEqual(module.inventory(restored), before)
+        self.assertEqual(self.g('show', ':tracked.txt', cwd=restored), 'staged')
+
+    def test_adopt_refuses_main_subdirectory_and_same_base(self):
+        with self.assertRaisesRegex(module.RescueError, 'primary'):
+            self.rescue.adopt(self.repo, 'main')
+        path = self.root / 'external'
+        self.g('worktree', 'add', '-b', 'external', str(path))
+        (path / 'nested').mkdir()
+        with self.assertRaisesRegex(module.RescueError, 'root'):
+            self.rescue.adopt(path / 'nested', 'main')
+        with self.assertRaisesRegex(module.RescueError, 'different'):
+            self.rescue.adopt(path, 'external')
+        self.assertFalse(self.rescue.state()['worktrees'])
+
+    def test_adopt_external_session_lease_blocks_cleanup(self):
+        path = self.root / 'external'
+        self.g('worktree', 'add', '-b', 'external', str(path))
+        self.rescue.adopt(path, 'main')
+        self.rescue.enqueue(dict(hook_event_name='SessionStart', session_id='external', cwd=str(path)))
+        self.assertEqual(self.sweep()[0]['action'], 'keep')
+        self.rescue.enqueue(dict(hook_event_name='SessionEnd', session_id='external', cwd=str(path)))
+        self.assertEqual(self.sweep()[0]['action'], 'archived')
+
+    def test_companion_has_only_lifecycle_hooks_and_can_run(self):
+        target = self.root / 'companion'
+        subprocess.run([sys.executable, str(SCRIPT), '--home', str(self.rescue.home),
+                        'companion', '--to', str(target)], check=True, capture_output=True)
+        hooks = json.loads((target / 'hooks' / 'hooks.json').read_text())['hooks']
+        self.assertNotIn('WorktreeCreate', hooks)
+        self.assertNotIn('WorktreeRemove', hooks)
+        self.assertIn('SessionEnd', hooks)
+        self.assertTrue((target / 'LICENSE').is_file())
+        self.assertTrue((target / 'README.md').is_file())
+        self.assertEqual(json.loads((target / '.claude-plugin' / 'plugin.json').read_text())['license'], 'MIT')
+        self.assertTrue((target / 'commands' / 'restore.md').exists())
+        subprocess.run([sys.executable, str(target / 'scripts' / 'rescue.py'),
+                        '--home', str(self.rescue.home), 'status'], check=True, capture_output=True)
+
 
 if __name__ == '__main__':
     unittest.main()

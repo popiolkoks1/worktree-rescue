@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Copy ignored environment files selected by Git-compatible `.worktreeinclude` patterns, with symlink and overwrite protection.
+- Explicitly adopt external linked worktrees while retaining their branches after cleanup.
+- Generate a lifecycle-only companion plugin for use alongside other worktree tools.
+- Demonstrate managed and external-worktree recovery, including environment setup, binary files and separate staging.
+- Explain the recovery use case and document comparisons and interoperability limits.
+
 ## 0.1.0
 
 - Claude Code plugin with native worktree lifecycle hooks.

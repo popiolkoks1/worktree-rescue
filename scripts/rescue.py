@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 DEFAULTS = {
     'enabled': True,
     'grace_seconds': 600,
@@ -254,7 +254,7 @@ class Rescue:
         path = Path(record['path'])
         if path.is_symlink() or not path.is_dir():
             raise RescueError('Worktree is missing or replaced by a symlink')
-        if not inside(path, self.home / 'worktrees'):
+        if not record.get('external', False) and not inside(path, self.home / 'worktrees'):
             raise RescueError('Worktree is outside the managed directory')
         if str(path.absolute()) != str(path.resolve()):
             raise RescueError('Worktree path contains a symlink')
@@ -304,6 +304,12 @@ class Rescue:
         with self.lock():
             state = self.state()
             git(source, 'worktree', 'add', '-b', branch, str(path), 'HEAD')
+            try:
+                self.copy_environment(source, path)
+            except Exception:
+                git(source, 'worktree', 'remove', '--force', str(path))
+                git(source, 'branch', '-D', branch)
+                raise
             gitdir = str(Path(git(path, 'rev-parse', '--absolute-git-dir')).resolve())
             record = {'id': ident, 'path': str(path), 'repo': str(source), 'common': str(common), 'gitdir': gitdir, 'branch': branch, 'base_ref': base_ref, 'created_at': time.time(), 'last_activity': time.time(), 'status': 'registered'}
             atomic_json(Path(gitdir) / 'worktree-rescue.json', {'id': ident})
@@ -314,6 +320,77 @@ class Rescue:
                 session.update(owner=owner or session.get('owner'), active=True, seen_at=time.time())
             self.save(state)
             self.log('created', id=ident, path=str(path))
+        return record
+
+    def copy_environment(self, source, target):
+        """Use Git's ignore-pattern parser; copy only ignored regular files."""
+        include = source / '.worktreeinclude'
+        if include.is_symlink():
+            raise RescueError('.worktreeinclude must not be a symlink')
+        if not include.exists():
+            return
+        if not include.is_file():
+            raise RescueError('.worktreeinclude must be a regular file')
+        def names(*options):
+            result = git(source, 'ls-files', '--others', '--ignored', *options, '-z', check=False)
+            if result.returncode:
+                raise RescueError(result.stderr.strip() or 'Cannot select environment files')
+            return set(result.stdout.split('\0'))
+        ignored = names('--exclude-standard')
+        selected = names('--exclude-from=' + str(include))
+        for name in sorted(ignored.intersection(selected) - {''}):
+            relative = Path(name)
+            if relative.is_absolute() or '..' in relative.parts or '.git' in relative.parts:
+                raise RescueError('Unsafe environment path: ' + name)
+            original, destination = source / relative, target / relative
+            if any((source / Path(*relative.parts[:i])).is_symlink() or
+                   (target / Path(*relative.parts[:i])).is_symlink()
+                   for i in range(1, len(relative.parts) + 1)):
+                raise RescueError('Environment paths must not contain symlinks: ' + name)
+            if not original.is_file() or destination.exists():
+                raise RescueError('Environment copy requires a regular file and unused target: ' + name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original, destination)
+
+    def adopt(self, location, base_ref):
+        """Explicitly enroll a linked worktree without owning its branch."""
+        path = Path(location).expanduser().absolute()
+        if path != path.resolve() or not path.is_dir():
+            raise RescueError('Adoption requires a canonical directory without symlinks')
+        if Path(git(path, 'rev-parse', '--show-toplevel')).resolve() != path:
+            raise RescueError('Pass the worktree root, not a subdirectory')
+        common = Path(git(path, 'rev-parse', '--git-common-dir'))
+        common = (path / common).resolve() if not common.is_absolute() else common.resolve()
+        gitdir = Path(git(path, 'rev-parse', '--absolute-git-dir')).resolve()
+        if gitdir == common or not inside(gitdir, common / 'worktrees'):
+            raise RescueError('Refusing to adopt a primary checkout')
+        branch = git(path, 'symbolic-ref', '--quiet', 'HEAD')[len('refs/heads/'):]
+        base = git(path, 'rev-parse', '--symbolic-full-name', '--verify', '--end-of-options', base_ref)
+        if not base.startswith(('refs/heads/', 'refs/remotes/')) or base == 'refs/heads/' + branch:
+            raise RescueError('Choose a different named integration branch')
+        ident = uuid.uuid4().hex[:16]
+        with self.lock():
+            state = self.state()
+            existing = next((r for r in state['worktrees'].values()
+                             if r['path'] == str(path) and r['status'] == 'registered'), None)
+            if existing:
+                self.validate(existing)
+                return existing
+            marker = gitdir / 'worktree-rescue.json'
+            if marker.exists():
+                raise RescueError('Worktree already has a Rescue marker; use its original state directory')
+            record = dict(id=ident, path=str(path), repo=str(path), common=str(common),
+                          gitdir=str(gitdir), branch=branch, base_ref=base, external=True,
+                          created_at=time.time(), last_activity=time.time(), status='registered')
+            atomic_json(marker, {'id': ident})
+            try:
+                self.validate(record)
+                state['worktrees'][ident] = record
+                self.save(state)
+            except Exception:
+                marker.unlink(missing_ok=True)
+                raise
+            self.log('adopted', id=ident, path=str(path), branch=branch)
         return record
 
     def enqueue(self, event, owner=None):
@@ -466,8 +543,8 @@ class Rescue:
                 raise RescueError('Worktree became active; archive retained and original preserved')
             git(path, 'worktree', 'remove', '--force', str(path))
             # Delete only this plugin's branch at the exact archived commit, never other refs.
-            deleted = run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '--git-dir', record['common'], 'update-ref', '-d', 'refs/heads/' + record['branch'], head], check=False)
-            if deleted.returncode:
+            deleted = None if record.get('external') else run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '--git-dir', record['common'], 'update-ref', '-d', 'refs/heads/' + record['branch'], head], check=False)
+            if deleted is not None and deleted.returncode:
                 self.log('branch-retained', id=record['id'], branch=record['branch'])
             record.update(status='archived', archive_id=ident, archived_at=time.time())
             self.save(state)
@@ -622,6 +699,11 @@ def main(argv=None):
     create = sub.add_parser('create', help='Create a managed worktree for any agent')
     create.add_argument('--repo', default='.')
     create.add_argument('--name', default='task')
+    adopt = sub.add_parser('adopt', help='Enroll an existing linked worktree; preserve its branch')
+    adopt.add_argument('path')
+    adopt.add_argument('--base', required=True, help='Named integration branch, for example main')
+    companion = sub.add_parser('companion', help='Build a lifecycle-only plugin for other worktree tools')
+    companion.add_argument('--to', required=True)
     sweep = sub.add_parser('sweep', help='Apply cleanup policy or preview decisions')
     sweep.add_argument('--dry-run', action='store_true')
     sub.add_parser('status', help='Show registered worktrees and cleanup decisions')
@@ -653,6 +735,47 @@ def main(argv=None):
         if worker.get('pid') and worker.get('token') and process_token(worker['pid']) == worker['token']:
             os.kill(worker['pid'], signal.SIGTERM)
         print('Worker stopped. Session hooks will start it again unless the plugin is disabled.')
+    elif args.command == 'companion':
+        target = Path(args.to).expanduser().absolute()
+        target.mkdir(parents=True, exist_ok=False)
+        (target / 'scripts').mkdir()
+        shutil.copy2(Path(__file__), target / 'scripts' / 'rescue.py')
+        (target / '.claude-plugin').mkdir()
+        atomic_json(target / '.claude-plugin' / 'plugin.json', {
+            'name': 'rescue-companion', 'version': VERSION, 'license': 'MIT',
+            'author': {'name': 'popiolkoks1'},
+            'repository': 'https://github.com/popiolkoks1/worktree-rescue',
+            'description': 'Lifecycle protection and recoverable cleanup for explicitly adopted worktrees.'})
+        root = Path(__file__).resolve().parents[1]
+        hooks = read_json(root / 'hooks' / 'hooks.json')
+        if not hooks:
+            shutil.rmtree(target)
+            raise RescueError('Build the companion from a plugin checkout, not the pip installation')
+        hooks['hooks'].pop('WorktreeCreate', None)
+        hooks['hooks'].pop('WorktreeRemove', None)
+        (target / 'hooks').mkdir()
+        atomic_json(target / 'hooks' / 'hooks.json', hooks)
+        for resource in ('LICENSE', '.claude-plugin/icon.png'):
+            if (root / resource).is_file():
+                shutil.copy2(root / resource, target / resource)
+        (target / 'README.md').write_text(
+            '# Worktree Rescue Companion\n\n'
+            'Automatically archive inactive, explicitly adopted Git worktrees and restore unfinished work. '
+            'This companion observes Claude Code session lifecycle without replacing another plugin’s '
+            'worktree creation or removal hooks. Before starting your agent, enroll its linked worktree '
+            'with `python3 scripts/rescue.py adopt /absolute/worktree --base main`. '
+            'Launch with `claude --plugin-dir /path/to/this/plugin` from that worktree. '
+            'Use `/rescue-companion:status`, `/rescue-companion:archives` and '
+            '`/rescue-companion:restore ID --to /new/path`. Adopted branches are retained. '
+            'Disable automatic deletion in your other tool: the companion cannot prevent it. '
+            'Archives are local and unencrypted, and can contain ignored secrets. '
+            'Full policy and setup: https://github.com/popiolkoks1/worktree-rescue#readme\n',
+            encoding='utf-8')
+        if (root / 'commands').is_dir():
+            shutil.copytree(root / 'commands', target / 'commands')
+        print(str(target))
+    elif args.command == 'adopt':
+        print(json.dumps(rescue.adopt(args.path, args.base), indent=2))
     elif args.command == 'create':
         print(json.dumps(rescue.create(args.repo, args.name), indent=2))
     elif args.command in ('sweep', 'status'):

@@ -20,7 +20,7 @@ Default policy waits ten minutes for integrated clean work. Inactive unfinished 
 4. Write the index tree and a temporary recovery commit so staged blobs are reachable from a self-contained Git bundle. No commit hooks run.
 5. Bundle history; tar working files; read every archived file and compare hashes/modes/links with the original inventory.
 6. Recheck working contents, HEAD and index tree. Atomically publish the archive with checksums and metadata.
-7. Recheck ownership, liveness and contents; remove only the registered worktree with Git. Delete only its namespaced branch with an expected old commit check.
+7. Recheck ownership, liveness and contents; remove only the registered worktree with Git. Delete only a Rescue-created namespaced branch with an expected old commit check; always retain explicitly adopted branches.
 8. Persist the result and history. Remove the temporary snapshot ref. Archives remain until the user deletes them.
 
 A failure before removal preserves the original. A failure after archive publication may leave both copies. An interruption after Git removal leaves the independently discoverable archive even if registry state is not yet updated. The implementation does not claim an atomic transaction with unrelated processes; writers can race the final removal. Avoid editing ended worktrees outside registered sessions.
@@ -34,3 +34,11 @@ Restore never overwrites an existing directory and never auto-registers the rest
 ## Operating limits
 
 macOS uses lsof and ps. Linux uses /proc and ps. This release does not install a system service, support Windows, detect every open file handle, run dependency setup, fetch remotes, identify squash merges or encrypt archives. The worker starts on hook activity and continues until stopped. Disable the plugin, pause cleanup and stop the worker when uninstalling.
+
+## Environment and companion integrations
+
+Managed creation selects the intersection of ignored files and `.worktreeinclude` matches using Git's pattern parser. Only regular files are copied; symlinks in either path are rejected, and existing destination files are never overwritten. Failed copying rolls back the newly created worktree and branch before registration.
+
+Explicit adoption records an external linked worktree and writes a Rescue marker in its private Git directory. The same identity, branch, operation, process and session checks apply outside the managed directory. Primary checkouts and detached worktrees are not adopted. Existing markers belonging to a different registry are refused. Adopted branches survive directory removal.
+
+The companion build command produces a separate portable plugin with the same engine, commands and lifecycle hooks but no create/remove hooks. It observes future session events only; other tools can still independently remove worktrees. Enrollment is not a backup and does not archive until the cleanup policy allows it.

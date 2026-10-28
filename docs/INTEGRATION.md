@@ -17,7 +17,7 @@ For a non-Claude adapter:
 
 Example events can be sent using a subprocess with a JSON stdin argument. Do not interpolate user prompts or paths into shell command text. Use an argument array.
 
-Only the plugin's own WorktreeCreate creates/owns worktrees. Worktrees created through arbitrary Bash calls, pre-existing native worktrees, and the early `--worktree --tmux` path are not adopted. No adapter should infer session death from inactivity alone.
+The default plugin creates managed worktrees. Existing linked worktrees, including those created through Bash or another plugin, require explicit `adopt PATH --base main` enrollment. Use the generated lifecycle-only companion plugin alongside another worktree integration (see README). Companion mode does not intercept another tool's removal, so disable that tool's automatic removal if recoverable cleanup is required. No adapter should infer session death from inactivity alone.
 
 ## Claude hooks
 
@@ -26,6 +26,6 @@ Only the plugin's own WorktreeCreate creates/owns worktrees. Worktrees created t
 - SessionStart, UserPromptSubmit, PostToolUse, Stop: enqueue lifecycle metadata, then ensure a single detached worker is running.
 - SessionEnd: enqueue the end event without waiting for the global archive lock. Claude's default exit budget is short.
 
-Installing another WorktreeCreate/WorktreeRemove override simultaneously is unsupported. No hooks edit Claude's settings, load repository-defined shell commands, or request model inference.
+Installing another WorktreeCreate/WorktreeRemove override alongside the default Rescue plugin is unsupported. The generated companion omits both hooks and uses the same local engine/state. Adopted branches are retained. No hooks edit Claude's settings, load repository-defined shell commands, or request model inference.
 
 References: [Claude hooks](https://code.claude.com/docs/en/hooks), [plugin manifest](https://code.claude.com/docs/en/plugins-reference), [marketplaces](https://code.claude.com/docs/en/plugin-marketplaces).

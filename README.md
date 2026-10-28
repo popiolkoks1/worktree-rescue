@@ -2,9 +2,9 @@
 
 <img src=".claude-plugin/icon.png" alt="Worktree Rescue" width="96" height="96">
 
-**Let Claude finish. Keep the work. Lose the leftovers.**
+**Automatically clean up agent worktrees. Restore unfinished work when you need it.**
 
-An open-source Claude Code plugin that quietly archives and cleans up finished Git worktrees. No account, cloud service, model calls or telemetry. Your source checkout stays where it is.
+An open-source Claude Code plugin that quietly archives and cleans up inactive Git worktrees, including unfinished work. No account, cloud service, model calls or telemetry. Your source checkout stays where it is.
 
 ```text
 Claude creates a worktree → Rescue registers ownership
@@ -39,7 +39,20 @@ For a local checkout before publishing/installing:
 claude --plugin-dir /absolute/path/to/worktree-rescue --worktree fix-login
 ```
 
-Claude owns the worktree-creation hook slot: use Rescue instead of another WorktreeCreate/WorktreeRemove integration, not alongside it. `--worktree --tmux` creates its worktree before plugins load and is outside this plugin's automatic registration.
+The default plugin owns the worktree-creation hook slot. To use another worktree plugin, choose [companion mode](#use-with-another-worktree-plugin) instead; do not enable both Rescue modes together. `--worktree --tmux` creates its worktree before plugins load and is outside this plugin's automatic registration.
+
+## Bring your local environment
+
+Create `.worktreeinclude` in the source checkout. It uses Git ignore patterns and selects only files that are also ignored by Git:
+
+```gitignore
+.env
+.env.local
+config/local/**
+!config/local/cache/**
+```
+
+Rescue copies matching regular files into each new managed worktree. Copies are independent, preserve file modes, and never overwrite tracked files. Symlinks are rejected. There are no automatic `.env` defaults: you choose what is copied. Install dependencies inside the new worktree; repository setup commands are never executed automatically. Companion mode leaves environment setup to the tool creating the worktree.
 
 ## What happens automatically?
 
@@ -83,7 +96,7 @@ cd worktree-rescue
 python3 scripts/demo.py
 ```
 
-The demo creates a temporary repository, stages one change, leaves another unstaged, adds an ignored local config file, archives the worktree and restores everything. The temporary data is removed afterward. [Example output](docs/DEMO.md).
+The demo copies an ignored local config into a new worktree, stages one change, leaves another unstaged, adds an untracked binary file, then runs the cleanup policy and restores everything. Run `python3 scripts/demo.py --external` to exercise the same recovery with a worktree created by another tool. The temporary data is removed afterward. [Example output](docs/DEMO.md).
 
 ## Use with another agent
 
@@ -99,9 +112,42 @@ python3 scripts/rescue.py archives
 python3 scripts/rescue.py restore ARCHIVE_ID --to /new/path
 ```
 
-External adapters should send SessionStart and SessionEnd metadata through `hook`, as documented in [the integration guide](docs/INTEGRATION.md). Without session leases, process checks still apply, but use explicit lifecycle events for reliable protection. Existing arbitrary worktrees are not auto-adopted.
+External adapters should send SessionStart and SessionEnd metadata through `hook`, as documented in [the integration guide](docs/INTEGRATION.md). Without session leases, process checks still apply, but use explicit lifecycle events for reliable protection. Existing worktrees can be explicitly enrolled with `adopt PATH --base main`; arbitrary directories are never automatically claimed.
 
 Optional CLI installation: `python3 -m pip install .` exposes `worktree-rescue`. The Claude plugin uses its bundled script and does not require pip.
+
+## Use with another worktree plugin
+
+Companion mode observes session lifecycle without defining `WorktreeCreate` or `WorktreeRemove`. Your existing tool keeps control of creation and setup.
+
+From a checkout, build a standalone companion plugin into a new directory:
+
+```bash
+python3 scripts/rescue.py companion --to "$HOME/.local/share/rescue-companion-plugin"
+# Enroll a particular linked worktree, choosing its integration branch:
+python3 scripts/rescue.py adopt /absolute/path/to/existing-worktree --base main
+claude --plugin-dir "$HOME/.local/share/rescue-companion-plugin"
+```
+
+Launch Claude from the adopted worktree, or enter it during the session. The companion's lifecycle hooks then protect it while active and start the usual worker. Commands use `/rescue-companion:status`, `/rescue-companion:archives` and `/rescue-companion:restore`.
+
+Adoption is explicit and idempotent. It validates the linked Git worktree, records its exact path and branch, and starts a fresh grace period. It never adopts a primary checkout or deletes the adopted branch. Use the same Rescue state directory for enrollment and session hooks. Run adoption before starting the agent; unknown existing sessions are not retroactively reconstructed.
+
+Companion mode protects **Rescue's own cleanup only**. It cannot prevent another plugin, Claude's native cleanup or a manual command from deleting a worktree. If your other tool removes worktrees on exit, disable that behavior there; otherwise Rescue may never get the opportunity to archive them. No repository-wide scan or automatic enrollment is performed.
+
+## Why another worktree tool?
+
+Claude Code already cleans up some native worktrees; other plugins improve worktree creation and protect dirty directories. Rescue focuses on recovering unfinished work after automatic cleanup: ignored and untracked files, reachable Git history, and separate staged and unstaged versions.
+
+| Tool | Main documented approach |
+|---|---|
+| [Claude Code](https://code.claude.com/docs/en/worktrees) | Periodically removes eligible native subagent/background worktrees; keeps work that would be lost. |
+| [worktree-plus](https://github.com/LeeJuOh/claude-code-zero/tree/main/plugins/worktree-plus) | Custom creation, environment copying and removal guards. |
+| [worktree-toolkit](https://github.com/thomast8/claude-worktree-toolkit) | Branch/PR navigation and moving work back to the main checkout. |
+| [agentproto](https://cli.agentproto.sh/docs/verbs/worktree) | Broader CLI with explicit archive and garbage collection commands. |
+| Worktree Rescue | Inactivity policy, verified recovery archives and restoration of working files plus staging. |
+
+These are documentation comparisons, not head-to-head benchmarks or claims of exclusive features.
 
 ## Configuration
 
@@ -132,9 +178,9 @@ Restore requires a new target path. It verifies file and bundle checksums, resto
 - Archives are local **and unencrypted**. Ignored files such as `.env` may contain credentials. Do not publish the state directory or upload archives to an issue.
 - This is recovery software, not a sandbox or an off-machine backup. Another process with your account permissions can modify its state. There is an unavoidable final race between checks and removal; active-session tracking and process checks reduce it, not eliminate it.
 - Nested Git repositories, initialized submodules, special files and unresolved index states are preserved rather than automatically removed.
-- WorktreeCreate replaces Claude's native setup; `.worktreeinclude` and another tool's setup hooks are not copied. Run dependency/setup commands inside the new worktree. Rescue never executes repository-defined shell hooks itself.
+- WorktreeCreate copies ignored regular files selected by `.worktreeinclude`, using Git ignore patterns (including negation). It refuses symlinks and never overwrites tracked files. No `.env` is copied unless selected. Run dependency/setup commands inside the new worktree; Rescue never executes repository-defined shell hooks.
 - A requested native removal that cannot be archived returns a hook error and keeps the directory. Exceptional failures may be shown by Claude; normal background sweeps are silent and recorded in history.
-- Only worktrees Rescue created under its managed directory are eligible. Source checkouts and unrelated projects are never cleanup targets.
+- Only worktrees Rescue created or you explicitly adopted are eligible. Primary checkouts are rejected. Adopted branches are retained after cleanup.
 
 See [architecture and recovery](docs/ARCHITECTURE.md) and [security policy](SECURITY.md).
 

@@ -1,6 +1,6 @@
 {
   "name": "rescue",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Quietly archive and clean finished Claude Code worktrees. Restore unfinished work whenever you need it.",
   "author": { "name": "popiolkoks1", "url": "https://github.com/popiolkoks1" },
   "repository": "https://github.com/popiolkoks1/worktree-rescue",
